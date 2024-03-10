@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 use bytemuck::{cast_slice, Pod, Zeroable};
 use cgmath::{Matrix, Matrix4, SquareMatrix};
-use std::{iter, mem};
+use std::{
+    iter, mem,
+    time::{Duration, Instant},
+};
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
@@ -105,6 +108,7 @@ impl Vertex {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>, // Change to u32 if you need more than 65,536 indices
@@ -113,7 +117,7 @@ pub struct Mesh {
 pub struct State {
     pub init: transforms::InitWgpu,
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer_vec: Vec<wgpu::Buffer>,
+    vertex_buffer_vec: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     vertex_uniform_buffer: wgpu::Buffer,
 
@@ -128,23 +132,153 @@ pub struct State {
 
     // texture
     diffuse_bind_group: wgpu::BindGroup,
-    diffuse_texture: texture::Texture, // NEW
-    // view_mat: Matrix4<f32>,
-    // project_mat: Matrix4<f32>,
-    num_vertices_vec: Vec<u32>,
-    index_buffer_vec: Vec<wgpu::Buffer>,
+    diffuse_texture: texture::Texture,
+    num_vertices_vec: u32,
+    index_buffer_vec: wgpu::Buffer,
+}
+
+enum Direction {
+    X,
+    Y,
+    Z,
+    NegX,
+    NegY,
+    NegZ,
+    None,
+}
+fn check_visibility(x: usize, y: usize, z: usize, cubes: &Vec<Vec<Vec<Mesh>>>) -> Vec<Direction> {
+    let mut directions: Vec<Direction> = Vec::new();
+    match cubes.get(x + 1) {
+        Some(inner_vec) => match inner_vec.get(y) {
+            Some(inner_inner_vec) => match inner_inner_vec.get(z) {
+                Some(_) => {}
+                None => directions.push(Direction::X),
+            },
+            None => directions.push(Direction::X),
+        },
+        None => directions.push(Direction::X),
+    };
+    // y = z
+    match cubes.get(x) {
+        Some(inner_vec) => match inner_vec.get(y + 1) {
+            Some(inner_inner_vec) => match inner_inner_vec.get(z) {
+                Some(_) => {}
+                None => directions.push(Direction::Y),
+            },
+            None => directions.push(Direction::Y),
+        },
+        None => directions.push(Direction::Y),
+    };
+    match cubes.get(x) {
+        Some(inner_vec) => match inner_vec.get(y) {
+            Some(inner_inner_vec) => match inner_inner_vec.get(z + 1) {
+                Some(_) => {}
+                None => directions.push(Direction::Z),
+            },
+            None => {}
+        },
+        None => {}
+    };
+    if x == 0 {
+        directions.push(Direction::NegX);
+    } else {
+        match cubes.get(x - 1) {
+            Some(inner_vec) => match inner_vec.get(y) {
+                Some(inner_inner_vec) => match inner_inner_vec.get(z) {
+                    Some(_) => {}
+                    None => directions.push(Direction::NegX),
+                },
+                None => {}
+            },
+            None => {}
+        };
+    }
+    if y == 0 {
+        directions.push(Direction::NegY);
+    } else {
+        match cubes.get(x) {
+            Some(inner_vec) => match inner_vec.get(y - 1) {
+                Some(inner_inner_vec) => match inner_inner_vec.get(z) {
+                    Some(_) => {}
+                    None => directions.push(Direction::NegY),
+                },
+                None => {}
+            },
+            None => {}
+        };
+    }
+    if z == 0 {
+        directions.push(Direction::NegZ);
+    } else {
+        match cubes.get(x) {
+            Some(inner_vec) => match inner_vec.get(y) {
+                Some(inner_inner_vec) => match inner_inner_vec.get(z - 1) {
+                    Some(_) => {}
+                    None => directions.push(Direction::NegZ),
+                },
+                None => {}
+            },
+            None => {}
+        };
+    }
+    directions
+}
+
+fn get_visible_cubes(cubes: &Vec<Vec<Vec<Mesh>>>) -> Vec<Vertex> {
+    let mut visible_cubes: Vec<Vertex> = Vec::new();
+    for x in 0..cubes.len() {
+        for y in 0..cubes[x].len() {
+            for z in 0..cubes[x][y].len() {
+                for direction in check_visibility(x, y, z, cubes) {
+                    match direction {
+                        Direction::X => {
+                            visible_cubes.append(cubes[x][y][z].vertices[6..12].to_vec().as_mut());
+                        }
+                        Direction::Y => {
+                            visible_cubes.append(cubes[x][y][z].vertices[24..30].to_vec().as_mut());
+                        }
+                        // x?
+                        Direction::Z => {
+                            visible_cubes.append(cubes[x][y][z].vertices[0..6].to_vec().as_mut());
+                        }
+                        Direction::NegX => {
+                            visible_cubes.append(cubes[x][y][z].vertices[18..24].to_vec().as_mut());
+                        }
+                        // neg z
+                        Direction::NegY => {
+                            visible_cubes.append(cubes[x][y][z].vertices[30..36].to_vec().as_mut());
+                        }
+                        // neg y
+                        Direction::NegZ => {
+                            visible_cubes.append(cubes[x][y][z].vertices[12..18].to_vec().as_mut());
+                        }
+                        Direction::None => {}
+                    }
+                }
+            }
+        }
+    }
+    visible_cubes
 }
 
 impl State {
-    pub async fn new(window: &Window, shape_data: &Vec<Mesh>, light_data: Light) -> Self {
-        let mut vertex_data_vec: Vec<Vec<Vertex>> = Vec::new();
-        for i in 0..shape_data.len() {
-            let mut vertex_data: Vec<Vertex> = Vec::with_capacity(shape_data[i].vertices.len());
-            for j in 0..shape_data[i].vertices.len() {
-                vertex_data.push(shape_data[i].vertices[j]);
-            }
-            vertex_data_vec.push(vertex_data);
+    pub async fn new(window: &Window, shape_data: &Vec<Vec<Vec<Mesh>>>, light_data: Light) -> Self {
+        let mut vertex_data_vec: Vec<Vertex> = Vec::new();
+        let visible_cubes: Vec<Vertex> = get_visible_cubes(shape_data);
+        dbg!(&visible_cubes.len());
+        // let mut vertex_data: Vec<Vertex> = Vec::with_capacity(visible_cubes.len());
+        for x in 0..visible_cubes.len() {
+            // for j in 0..visible_cubes[x].vertices.len() {
+            vertex_data_vec.push(visible_cubes[x]);
+            // }
+            // vertex_data_vec.push(vertex_data);
         }
+        // let mut vertex_data: Vec<Vertex> = Vec::with_capacity(visible_cubes[i].vertices.len());
+        // for j in 0..visible_cubes[i].vertices.len() {
+        //     vertex_data.push(visible_cubes[i].vertices[j]);
+        // }
+        // vertex_data_vec.push(vertex_data);
+
         // for shape_item in shape_data.iter() {
         //     if let Some(positions) = &shape_item.0 {
         //         let mut vertex_data: Vec<Vertex> = Vec::new();
@@ -446,33 +580,53 @@ impl State {
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
             });
-        let vertex_buffer_vec = vertex_data_vec
-            .iter()
-            .map(|vertex_data| {
-                init.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Vertex Buffer"),
-                        contents: cast_slice(&vertex_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            })
-            .collect::<Vec<wgpu::Buffer>>();
-        let index_buffer_vec = shape_data
-            .iter()
-            .map(|shape_data| {
-                init.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Index Buffer"),
-                        contents: cast_slice(&shape_data.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    })
-            })
-            .collect::<Vec<wgpu::Buffer>>();
+        let vertex_buffer_vec = init
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: cast_slice(&vertex_data_vec),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let num_vertices_vec = visible_cubes.len() as u32;
+        let index_buffer_vec = init
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: cast_slice(&(0..visible_cubes.len() as u32).collect::<Vec<u32>>()),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        // let vertex_buffer_vec = vertex_data_vec
+        //     .iter()
+        //     .map(|vertex_data| {
+        //         init.device
+        //             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        //                 label: Some("Vertex Buffer"),
+        //                 contents: cast_slice(&vertex_data),
+        //                 usage: wgpu::BufferUsages::VERTEX,
+        //             })
+        //     })
+        //     .collect::<Vec<wgpu::Buffer>>();
+        // let index_buffer_vec = shape_data
+        //     .iter()
+        //     .flatten()
+        //     .flatten()
+        //     .map(|shape_data| {
+        //         init.device
+        //             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        //                 label: Some("Index Buffer"),
+        //                 contents: cast_slice(&shape_data.indices),
+        //                 usage: wgpu::BufferUsages::INDEX,
+        //             })
+        //     })
+        //     .collect::<Vec<wgpu::Buffer>>();
 
-        let num_vertices_vec = shape_data
-            .iter()
-            .map(|shape_data| shape_data.indices.len() as u32)
-            .collect::<Vec<u32>>();
+        // let num_vertices_vec = shape_data
+        //     .iter()
+        //     .flatten()
+        //     .flatten()
+        //     .map(|shape_data| shape_data.indices.len() as u32)
+        //     .collect::<Vec<u32>>();
+
         // let index_buffer_vec = shape_data
         //     .iter()
         //     .map(|shape_data| {
@@ -565,12 +719,8 @@ impl State {
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
 
-        let model_mat = transforms::create_transforms(
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-            // [dt.sin(), dt.cos(), 0.0],
-            [1.0, 1.0, 1.0],
-        );
+        let model_mat =
+            transforms::create_transforms([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
         // let view_project_mat = self.project_mat * self.view_mat;
         let view_project_mat = flatten(self.camera_uniform.view_proj);
         let normal_mat = (model_mat.invert().unwrap()).transpose();
@@ -655,15 +805,11 @@ impl State {
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.set_bind_group(2, &self.diffuse_bind_group, &[]); // NEW!
-            for i in 0..self.vertex_buffer_vec.len() {
-                render_pass.set_vertex_buffer(0, self.vertex_buffer_vec[i].slice(..));
-                render_pass.set_index_buffer(
-                    self.index_buffer_vec[i].slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                render_pass.draw_indexed(0..self.num_vertices_vec[i], 0, 0..1);
-            }
+            render_pass.set_bind_group(2, &self.diffuse_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer_vec.slice(..));
+            render_pass
+                .set_index_buffer(self.index_buffer_vec.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..self.num_vertices_vec, 0, 0..1);
         }
 
         self.init.queue.submit(iter::once(encoder.finish()));
@@ -672,8 +818,7 @@ impl State {
         Ok(())
     }
 }
-
-pub fn run(shape_data: &Vec<Mesh>, light_data: Light) {
+pub fn run(shape_data: &Vec<Vec<Vec<Mesh>>>, light_data: Light) {
     env_logger::init();
     let event_loop = EventLoop::new();
     let window = winit::window::WindowBuilder::new()
@@ -683,6 +828,8 @@ pub fn run(shape_data: &Vec<Mesh>, light_data: Light) {
 
     let mut state = pollster::block_on(State::new(&window, &shape_data, light_data));
     let mut render_start_time = std::time::Instant::now();
+    let mut frame_count = 0;
+    let mut elapsed_time = Duration::new(0, 0);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -715,6 +862,17 @@ pub fn run(shape_data: &Vec<Mesh>, light_data: Light) {
             let now = std::time::Instant::now();
             let dt = now - render_start_time;
             render_start_time = now;
+            elapsed_time += dt;
+            frame_count += 1;
+
+            if elapsed_time.as_secs_f32() >= 1.0 {
+                let fps = frame_count as f32 / elapsed_time.as_secs_f32();
+                println!("FPS: {}", fps);
+
+                // Reset the counter and elapsed time
+                frame_count = 0;
+                elapsed_time = Duration::new(0, 0);
+            }
             state.update(dt);
 
             match state.render() {

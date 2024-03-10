@@ -70,7 +70,7 @@ fn main() {
     //     Option<Vec<[f32; 3]>>,
     //     Option<Vec<u32>>,
     // )> = vec![
-    let mut meshes: Vec<Mesh> = vec![];
+    let mut meshes: Vec<Vec<Vec<Mesh>>> = vec![];
     // meshes.push(create_sphere(1.0, 100, 50));
     // meshes.push(sd::ParametricSurface::new(sd::ParametricSurface {
     //     f: math_func::klein_bottle,
@@ -85,15 +85,34 @@ fn main() {
     // }));
     // meshes.push(create_cube([0.0, 0.0, 0.0], 10.0));
     let gap = 1.0;
-    for z in 0..10 {
-        for y in 0..10 {
-            for x in 0..10 {
-                meshes.push(create_cube(
+    // y
+    for x in 0..16 {
+        meshes.push(vec![]);
+        // z
+        for y in 0..16 {
+            meshes[x].push(vec![]);
+            // x
+            for z in 0..16 {
+                meshes[x][y].push(create_cube(
                     [x as f32 * gap, y as f32 * gap, z as f32 * gap],
                     1.0,
                 ));
             }
         }
     }
+    // for x in 0..10 {
+    //     meshes[x].push(vec![]);
+    //     for y in 0..10 {
+    //         meshes[x][y].push(vec![]);
+    //         for z in 0..10 {
+    //             meshes[x][y][z] =
+    //                 create_cube([x as f32 * gap, y as f32 * gap, z as f32 * gap], 1.0);
+    //             // meshes.push(create_cube(
+    //             //     [x as f32 * gap, y as f32 * gap, z as f32 * gap],
+    //             //     1.0,
+    //             // ));
+    //         }
+    //     }
+    // }
     common::run(&meshes, light_data);
 }
